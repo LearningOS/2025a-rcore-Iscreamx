@@ -43,6 +43,8 @@ pub struct TaskManager {
 pub struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
+    /// system call counts
+    counts: [usize; MAX_APP_NUM * 5],
     /// id of current `Running` task
     current_task: usize,
 }
@@ -55,6 +57,7 @@ lazy_static! {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
         }; MAX_APP_NUM];
+        let counts = [0; MAX_APP_NUM * 5];
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -64,6 +67,7 @@ lazy_static! {
             inner: unsafe {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
+                    counts,
                     current_task: 0,
                 })
             },
@@ -133,6 +137,34 @@ impl TaskManager {
             // go back to user mode
         } else {
             panic!("All applications completed!");
+        }
+    }
+
+    /// Increment syscall count for a given syscall_id
+    pub fn increment_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let base = inner.current_task * 5;
+        match syscall_id {
+            64 => inner.counts[base] += 1,
+            93 => inner.counts[base + 1] += 1,
+            124 => inner.counts[base + 2] += 1,
+            169 => inner.counts[base + 3] += 1,
+            410 => inner.counts[base + 4] += 1,
+            _ => {}
+        }
+    }
+
+    /// Get syscall count for a given syscall_id
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let base = inner.current_task * 5;
+        match syscall_id {
+            64 => inner.counts[base],
+            93 => inner.counts[base + 1],
+            124 => inner.counts[base + 2],
+            169 => inner.counts[base + 3],
+            410 => inner.counts[base + 4],
+            _ => 0,
         }
     }
 }
