@@ -17,6 +17,7 @@ mod task;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::mm::{VirtAddr, PageTable};
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
@@ -153,6 +154,114 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// Increment syscall count for a given syscall_id
+    pub fn increment_syscall_count(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        inner.tasks[current_task].syscall_counts[syscall_id] += 1;
+    }
+
+    /// Get syscall count for a given syscall_id
+    pub fn get_syscall_count(&self, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current_task = inner.current_task;
+        inner.tasks[current_task].syscall_counts[syscall_id]
+    }
+    /// Map a memory region for the current task.
+    pub fn map_memory(&self, start: usize, len: usize, port: usize) -> isize {
+        if start % crate::config::PAGE_SIZE != 0 { return -1; }
+        if port & !0x7 != 0 || port & 0x7 == 0 { return -1; }
+
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+
+        if inner.tasks[current].memory_set.is_overlapped(start, start + len) {
+            return -1;
+        }
+
+        let mut perm = crate::mm::MapPermission::U;
+        if port & 0x1 != 0 { perm |= crate::mm::MapPermission::R; }
+        if port & 0x2 != 0 { perm |= crate::mm::MapPermission::W; }
+        if port & 0x4 != 0 { perm |= crate::mm::MapPermission::X; }
+
+        println!("[DEBUG] Mapping memory: start={:#x}, len={}, perm={:?}", start, len, perm);
+        inner.tasks[current]
+            .memory_set
+            .insert_framed_area(start_va, end_va, perm);
+        0
+    }
+    /// Unmap a memory region for the current task.
+    pub fn unmap_memory(&self, start: usize, len: usize) -> isize {
+        if start % crate::config::PAGE_SIZE != 0 { return -1; }
+
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        inner.tasks[current]
+            .memory_set
+            .remove_area_with_start_vpn(start_vpn, end_vpn)
+    }
+    /// Write a byte to the address.
+    fn trace_write(&self, addr: usize, data: usize) -> isize {
+        let vaddr = VirtAddr::from(addr);
+        let vpn = vaddr.floor();
+        println!("[DEBUG] sys_trace write: vaddr={:#x}, vpn={:?}, data={}", addr, vpn, data);
+        let inner = TASK_MANAGER.inner.exclusive_access();
+        let current = inner.current_task;
+        if !inner.tasks[current].memory_set.is_mapped(vpn) {
+            return -1;
+        }
+        let token = inner.tasks[current].get_user_token();
+        drop(inner);
+
+        let page_table = PageTable::from_token(token);
+
+        if let Some(pte) = page_table.translate(vpn) {
+            if !pte.is_valid() || !pte.writable() {
+                return -1;
+            }
+            let ppn = pte.ppn();
+            let offset = vaddr.page_offset();
+            let bytes = ppn.get_bytes_array();
+            bytes[offset] = data as u8;
+            return 0;
+        } else {
+            return -1;
+        }
+    }
+    /// Read a byte from the address.
+    fn trace_read(&self, addr: usize) -> isize {
+        let vaddr = VirtAddr::from(addr);
+        let vpn = vaddr.floor();
+        println!("[DEBUG] sys_trace read: vaddr={:#x}, vpn={:?}", addr, vpn);
+        let inner = TASK_MANAGER.inner.exclusive_access();
+        let current = inner.current_task;
+        if !inner.tasks[current].memory_set.is_mapped(vpn) {
+            return -1;
+        }
+        let token = inner.tasks[current].get_user_token();
+        drop(inner);
+
+        let page_table = PageTable::from_token(token);
+        if let Some(pte) = page_table.translate(vpn) {
+            if !pte.is_valid() || !pte.readable() {
+                return -1;
+            }
+            let ppn = pte.ppn();
+            let offset = vaddr.page_offset();
+            let bytes = ppn.get_bytes_array();
+            return bytes[offset] as isize;
+        } else {
+            return -1;
+        }
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +310,14 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Read a byte from the trace buffer.
+pub fn trace_read(addr: usize) -> isize {
+    TASK_MANAGER.trace_read(addr)
+}
+
+/// Write a byte to the trace buffer.
+pub fn trace_write(addr: usize, data: usize) -> isize {
+    TASK_MANAGER.trace_write(addr, data)
 }
