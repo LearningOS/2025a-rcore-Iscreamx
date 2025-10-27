@@ -6,9 +6,11 @@ use crate::{
     mm::{translated_refmut, translated_str},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, map_memory, unmap_memory
     },
 };
+use crate::timer::get_time_us;
+use crate::mm::translated_byte_buffer;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -105,30 +107,63 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let us = get_time_us();
+    let sec = (us / 1_000_000) as usize;
+    let usec = (us % 1_000_000) as usize;
+
+    let token = current_user_token();
+    let size = core::mem::size_of::<TimeVal>();
+
+    let mut bufs = translated_byte_buffer(token, ts as *const u8, size);
+
+    let sec_bytes = sec.to_ne_bytes();
+    let usec_bytes = usec.to_ne_bytes();
+    let usize_bytes = core::mem::size_of::<usize>();
+
+    let mut written = 0usize;
+    for chunk in bufs.iter_mut() {
+        for b in chunk.iter_mut() {
+            if written < usize_bytes {
+                *b = sec_bytes[written];
+            } else if written < 2 * usize_bytes {
+                *b = usec_bytes[written - usize_bytes];
+            } else {
+                break;
+            }
+            written += 1;
+            if written >= 2 * usize_bytes {
+                break;
+            }
+        }
+        if written >= 2 * usize_bytes {
+            break;
+        }
+    }
+
+    0
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    map_memory(start, len, port)
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    unmap_memory(start, len)
 }
 
 /// change data segment size
@@ -148,7 +183,23 @@ pub fn sys_spawn(_path: *const u8) -> isize {
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, _path);
+    if let Some(data) = get_app_data_by_name(path.as_str()) {
+        let current = current_task().unwrap();
+        
+        let new_task = current.spawn(data);
+        let new_pid = new_task.pid.0;
+        
+        let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
+        trap_cx.x[10] = 0;
+        
+        add_task(new_task);
+        
+        new_pid as isize
+    } else {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.

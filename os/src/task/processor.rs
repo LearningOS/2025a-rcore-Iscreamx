@@ -9,6 +9,7 @@ use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::mm::{self, VirtAddr};
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -44,9 +45,48 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
+
+    ///Map a memory region for the current task
+    fn map_memory(&mut self, start: usize, len: usize, port: usize) -> isize {
+        if start % crate::config::PAGE_SIZE != 0 { return -1; }
+        if port & !0x7 != 0 || port & 0x7 == 0 { return -1; }
+
+        let inner = self.current().unwrap();
+        let mut task = inner.inner_exclusive_access();
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+
+        if task.memory_set.is_overlapped(start, start + len) {
+            return -1;
+        }
+
+        let mut perm = mm::MapPermission::U;
+        if port & 0x1 != 0 { perm |= mm::MapPermission::R; }
+        if port & 0x2 != 0 { perm |= mm::MapPermission::W; }
+        if port & 0x4 != 0 { perm |= mm::MapPermission::X; }
+
+        println!("[DEBUG] Mapping memory: start={:#x}, len={}, perm={:?}", start, len, perm);
+        task.memory_set.insert_framed_area(start_va, end_va, perm);
+        0
+    }
+
+    ///Unmap a memory region for the current task
+    fn unmap_memory(&mut self, start: usize, len: usize) -> isize {
+        if start % crate::config::PAGE_SIZE != 0 { return -1; }
+
+        let inner = self.current().unwrap();
+        let mut task = inner.inner_exclusive_access();
+        let start_va = VirtAddr::from(start);
+        let end_va = VirtAddr::from(start + len);
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        task.memory_set.remove_area(start_vpn, end_vpn)
+    }
 }
 
 lazy_static! {
+    /// Creation of initial PROCESSOR
     pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
 }
 
@@ -108,4 +148,14 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+///Map a memory region for the current task
+pub fn map_memory(start: usize, len: usize, port: usize) -> isize {
+    PROCESSOR.exclusive_access().map_memory(start, len, port)
+}
+
+///Unmap a memory region for the current task
+pub fn unmap_memory(start: usize, len: usize) -> isize {
+    PROCESSOR.exclusive_access().unmap_memory(start, len)
 }
