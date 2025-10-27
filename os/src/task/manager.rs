@@ -20,10 +20,21 @@ impl TaskManager {
     /// Add process back to ready queue
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
         self.ready_queue.push_back(task);
+        self.ready_queue
+            .make_contiguous()
+            .sort_by_key(|t| t.inner_exclusive_access().stride);
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if let Some(task) = self.ready_queue.pop_front() {
+            let mut inner = task.inner_exclusive_access();
+            // println!("Selected process with stride {} and pass {}", inner.stride, inner.pass);
+            inner.stride += inner.pass;
+            drop(inner);
+            Some(task)
+        } else {
+            None
+        }
     }
 }
 
