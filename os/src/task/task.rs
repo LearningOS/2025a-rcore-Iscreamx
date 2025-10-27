@@ -36,6 +36,17 @@ impl TaskControlBlock {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
     }
+    /// Spawn a new process from ELF data
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let task_control_block = Arc::new(Self::new(elf_data));
+        {
+            let mut parent_inner = self.inner_exclusive_access();
+            let mut child_inner = task_control_block.inner_exclusive_access();
+            child_inner.parent = Some(Arc::downgrade(self));
+            parent_inner.children.push(task_control_block.clone());
+        }
+        task_control_block
+    }
 }
 
 pub struct TaskControlBlockInner {

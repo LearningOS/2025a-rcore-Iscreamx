@@ -318,6 +318,44 @@ impl MemorySet {
             false
         }
     }
+
+    /// Check if the given range overlaps with any existing mapped areas.
+    pub fn is_overlapped(&self, start: usize, end: usize) -> bool {
+        let start_vpn = VirtAddr::from(start).floor();
+        let end_vpn = VirtAddr::from(end).ceil();
+        for area in self.areas.iter() {
+            if !(end_vpn <= area.vpn_range.get_start() || start_vpn >= area.vpn_range.get_end())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Remove a mapped area from the memory set.
+    pub fn remove_area(&mut self, start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> isize{
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if !self.is_mapped(vpn) {
+                return -1;
+            }
+        }
+
+        if let Some((idx, area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, area)| area.vpn_range.get_start() == start_vpn)
+        {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+        }
+        0
+    }
+
+    /// Check if a virtual page is mapped.
+    pub fn is_mapped(&self, vpn: VirtPageNum) -> bool {
+        self.areas.iter().any(|area| area.vpn_range.get_start() <= vpn && vpn < area.vpn_range.get_end())
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
