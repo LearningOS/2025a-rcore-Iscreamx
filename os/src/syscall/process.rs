@@ -6,6 +6,8 @@ use crate::{
         suspend_current_and_run_next, SignalFlags,
     },
 };
+use crate::timer::get_time_us;
+use crate::mm::translated_byte_buffer;
 use alloc::{string::String, sync::Arc, vec::Vec};
 
 #[repr(C)]
@@ -151,12 +153,45 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let us = get_time_us();
+    let sec = (us / 1_000_000) as usize;
+    let usec = (us % 1_000_000) as usize;
+
+    let token = current_user_token();
+    let size = core::mem::size_of::<TimeVal>();
+
+    let mut bufs = translated_byte_buffer(token, ts as *const u8, size);
+
+    let sec_bytes = sec.to_ne_bytes();
+    let usec_bytes = usec.to_ne_bytes();
+    let usize_bytes = core::mem::size_of::<usize>();
+
+    let mut written = 0usize;
+    for chunk in bufs.iter_mut() {
+        for b in chunk.iter_mut() {
+            if written < usize_bytes {
+                *b = sec_bytes[written];
+            } else if written < 2 * usize_bytes {
+                *b = usec_bytes[written - usize_bytes];
+            } else {
+                break;
+            }
+            written += 1;
+            if written >= 2 * usize_bytes {
+                break;
+            }
+        }
+        if written >= 2 * usize_bytes {
+            break;
+        }
+    }
+
+    0
 }
 
 /// mmap syscall
