@@ -2,7 +2,7 @@
 
 mod inode;
 mod stdio;
-
+pub use inode::{linkat, unlinkat};
 use crate::mm::UserBuffer;
 
 /// trait File for all file types
@@ -15,11 +15,13 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> usize;
     /// write to the file from buf, return the number of bytes written
     fn write(&self, buf: UserBuffer) -> usize;
+    /// get the stat of the file
+    fn read_stat(&self) -> Stat;
 }
 
 /// The stat of a inode
 #[repr(C)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Stat {
     /// ID of device containing file
     pub dev: u64,
@@ -31,6 +33,18 @@ pub struct Stat {
     pub nlink: u32,
     /// unused pad
     pad: [u64; 7],
+}
+
+impl Default for Stat {
+    fn default() -> Self {
+        Self {
+            dev: 0,
+            ino: 0,
+            mode: StatMode::NULL,
+            nlink: 1,
+            pad: [0; 7],
+        }
+    }
 }
 
 bitflags! {

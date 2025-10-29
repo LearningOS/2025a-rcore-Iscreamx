@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -25,17 +25,74 @@ pub struct OSInode {
 /// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
+    stat: Stat,
     inode: Arc<Inode>,
 }
 
 impl OSInode {
     /// create a new inode in memory
     pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+        let is_dir = inode.is_dir();
+        let nlink = inode.get_nlink();
+        
+        let stat = Stat {
+            dev: 0,
+            ino: 0,  // 暂时填 0
+            mode: if is_dir {
+                StatMode::DIR
+            } else {
+                StatMode::FILE
+            },
+            nlink,
+            ..Default::default()
+        };
+        
         Self {
             readable,
             writable,
-            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
+            inner: unsafe { 
+                UPSafeCell::new(OSInodeInner { 
+                    offset: 0, 
+                    inode,
+                    stat,
+                }) 
+            },
         }
+    }
+    /// Create a hard link to this file
+    pub fn create_link(&self, new_name: &str) -> bool {
+        let inner = self.inner.exclusive_access();
+        let inode = inner.inode.clone();
+        drop(inner);
+        
+        if ROOT_INODE.link(new_name, &inode).is_ok() {
+            inode.modify_disk_inode(|disk_inode| {
+                disk_inode.inc_nlink();
+            });
+            
+            let mut inner = self.inner.exclusive_access();
+            inner.stat.nlink += 1;
+            
+            true
+        } else {
+            false
+        }
+    }
+    /// Decrease link count when unlinking
+    pub fn decrease_link(&self) -> u32 {
+        let inner = self.inner.exclusive_access();
+        
+        // 减少磁盘上的 nlink
+        let nlink = inner.inode.modify_disk_inode(|disk_inode| {
+            disk_inode.dec_nlink()
+        });
+        
+        drop(inner);
+        
+        let mut inner = self.inner.exclusive_access();
+        inner.stat.nlink = nlink;
+        
+        nlink
     }
     /// read all data from the inode
     pub fn read_all(&self) -> Vec<u8> {
@@ -125,6 +182,69 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     }
 }
 
+/// Create a hard link
+pub fn linkat(old_name: &str, new_name: &str) -> bool {
+    println!("[DEBUG] linkat: old_name={}, new_name={}", old_name, new_name);
+    
+    println!("[DEBUG] linkat: finding old_name");
+    if let Some(old_inode) = ROOT_INODE.find(old_name) {
+        println!("[DEBUG] linkat: old_name found");
+        
+        println!("[DEBUG] linkat: checking if new_name exists");
+        if ROOT_INODE.find(new_name).is_some() {
+            println!("[DEBUG] linkat: new_name already exists, returning false");
+            return false;
+        }
+        
+        println!("[DEBUG] linkat: creating link");
+        if ROOT_INODE.link(new_name, &old_inode).is_ok() {
+            println!("[DEBUG] linkat: link created, increasing nlink");
+            
+            old_inode.modify_disk_inode(|disk_inode| {
+                disk_inode.inc_nlink();
+            });
+            println!("[DEBUG] linkat: success");
+            true
+        } else {
+            println!("[DEBUG] linkat: link creation failed");
+            false
+        }
+    } else {
+        println!("[DEBUG] linkat: old_name not found");
+        false
+    }
+}
+
+/// Remove a hard link
+pub fn unlinkat(name: &str) -> bool {
+    println!("[DEBUG] unlinkat: name={}", name);
+    
+    println!("[DEBUG] unlinkat: finding file");
+    if let Some(inode) = ROOT_INODE.find(name) {
+        println!("[DEBUG] unlinkat: file found, decreasing nlink");
+        
+        let new_nlink = inode.modify_disk_inode(|disk_inode| {
+            disk_inode.dec_nlink()
+        });
+        
+        println!("[DEBUG] unlinkat: new_nlink={}", new_nlink);
+        
+        println!("[DEBUG] unlinkat: removing directory entry");
+        ROOT_INODE.unlink(name);
+        
+        if new_nlink == 0 {
+            println!("[DEBUG] unlinkat: nlink is 0, clearing file");
+            inode.clear();
+        }
+        
+        println!("[DEBUG] unlinkat: success");
+        true
+    } else {
+        println!("[DEBUG] unlinkat: file not found");
+        false
+    }
+}
+
 impl File for OSInode {
     fn readable(&self) -> bool {
         self.readable
@@ -155,5 +275,17 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn read_stat(&self) -> Stat {
+        let mut inner = self.inner.exclusive_access();
+        
+        let nlink = inner.inode.read_disk_inode(|disk_inode| {
+            disk_inode.get_nlink()
+        });
+        
+        // 更新内存中的 stat
+        inner.stat.nlink = nlink;
+        
+        inner.stat.clone()
     }
 }

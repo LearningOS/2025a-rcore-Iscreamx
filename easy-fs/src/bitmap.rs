@@ -25,6 +25,10 @@ impl Bitmap {
             blocks,
         }
     }
+    /// Get the number of blocks in the bitmap
+    pub fn blocks(&self) -> usize {
+        self.blocks
+    }
     /// Allocate a new block from a block device
     pub fn alloc(&self, block_device: &Arc<dyn BlockDevice>) -> Option<usize> {
         for block_id in 0..self.blocks {
