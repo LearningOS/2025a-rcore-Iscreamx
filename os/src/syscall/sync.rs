@@ -368,7 +368,8 @@ fn check_semaphore_deadlock(sem_id: usize) -> bool {
             }
             let mut can_finish = true;
             for j in 0..m {
-                if allocation[i][j] > work[j] {
+                // 每个线程最多只会再请求 1 个资源
+                if work[j] < 1 {
                     can_finish = false;
                     break;
                 }
